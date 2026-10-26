@@ -23,6 +23,8 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import clone, replace
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
+# 这些数值是 XL330 的辨识参数，描述电气响应和摩擦；不能直接当成普通 PD 增益调节。
+# 舵机 封装，接受指令 执行具体转动  电压->原始电机->关节转动 
 _XL330_MOTOR_CFG = BamMotorCfg(
     model="m6",
     kt=0.36601349688984386,
@@ -44,6 +46,9 @@ _XL330_MOTOR_CFG = BamMotorCfg(
 )
 """XL330 m6 fit from Rhoban BAM revision ``62bd8ce12154340be97e06f7f41a0ca8f116d967``."""
 
+# 动作和关节观测共用此顺序：左腿 5 维、颈头 4 维、右腿 5 维。
+# USD 内部先列右腿，使用列表选择关节时需保留顺序，避免策略输出驱动错关节。
+# 相对默认姿态的偏移角度
 MICRODUCK_JOINT_NAMES: list[str] = [
     "left_hip_yaw",
     "left_hip_roll",
@@ -71,12 +76,14 @@ MICRODUCK_HEAD_JOINT_NAMES: list[str] = ["neck_pitch", "head_pitch", "head_yaw",
 MICRODUCK_LEG_JOINT_NAMES: list[str] = [n for n in MICRODUCK_JOINT_NAMES if n not in MICRODUCK_HEAD_JOINT_NAMES]
 """The 10 leg servos, in servo order (left leg first)."""
 
+# usd描述鸭子参数
 MICRODUCK_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/PollenRobotics/MicroDuck/microduck_walk.usd",
         activate_contact_sensors=True,
         articulation_props=NewtonArticulationCfg(self_collision_enabled=True),
     ),
+    # 根位置单位为米，关节角单位为弧度；左右关节轴方向不同，因此对称站姿可能使用相反符号。
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.125),
         joint_pos={
@@ -106,6 +113,7 @@ MICRODUCK_CFG = ArticulationCfg(
             vin_range=(6.5, 8.2),
             vin_drop_gain_range=(0.0, 0.2),
             vin_min=6.0,
+            # 延迟以物理步计；平地任务 dt=0.005 s，对应 15–30 ms，不能按策略周期换算。
             min_delay=3,
             max_delay=6,
         ),
@@ -115,18 +123,19 @@ MICRODUCK_CFG = ArticulationCfg(
 
 Requires Newton's MJWarp solver and ``SimulationCfg.use_newton_actuators=True``.
 """
-
+# 对鸭子的全部碰撞体进行建模，增加躯干、臀部和头部的碰撞几何体，便于全身接触。
 MICRODUCK_ALLCOLLISIONS_CFG = clone(MICRODUCK_CFG)
 MICRODUCK_ALLCOLLISIONS_CFG.spawn.usd_path = (
     f"{ISAACLAB_NUCLEUS_DIR}/Robots/PollenRobotics/MicroDuck/microduck_allcollisions.usd"
 )
 """MicroDuck with additional trunk, hip, and head collision geometry for whole-body contact."""
 
-
+# 对齿轮间隙进行建模
 def _with_backlash(cfg: ArticulationCfg, usd_name: str) -> ArticulationCfg:
     """Use the USD with a passive gearbox-play hinge in series with each servo."""
     cfg = clone(cfg)
     cfg.spawn.usd_path = f"{ISAACLAB_NUCLEUS_DIR}/Robots/PollenRobotics/MicroDuck/{usd_name}"
+    # 被动齿隙关节串联在舵机之后，不增加策略动作维数；模板将每个舵机映射到对应被动关节。
     cfg.actuators["servos"] = replace(cfg.actuators["servos"], backlash_joint_template="passive_{}_backlash")
     cfg.init_state.joint_pos["passive_.*"] = 0.0
     return cfg

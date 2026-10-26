@@ -35,6 +35,7 @@ class MicroDuckTerrainImporter(terrain_gen.TerrainImporter):
 class MicroDuckRoughSceneCfg(MicroDuckSceneCfg):
     """Walking scene with two terrain rays per foot, excluded from actor observations."""
 
+    # 每只脚的射线用于估计相对局部地面的高度；不加入 actor 输入，因此策略仍是盲走。
     left_foot_height = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Geometry/trunk_base/yaw2roll/hip_l/upper_leg_left/leg/ankle_left",
         mesh_prim_paths=["/World/ground"],
@@ -63,6 +64,7 @@ class MicroDuckVelocityRoughEnvCfg(MicroDuckVelocityFlatEnvCfg):
     curriculum: MicroDuckRoughCurriculumCfg = MicroDuckRoughCurriculumCfg()
 
     def __post_init__(self):
+        # 先继承平地任务的控制频率、动作和观测接口，再覆盖地形及相关奖励参数。
         super().__post_init__()
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.class_type = MicroDuckTerrainImporter
@@ -73,6 +75,7 @@ class MicroDuckVelocityRoughEnvCfg(MicroDuckVelocityFlatEnvCfg):
             num_rows=10,
             num_cols=20,
             curriculum=True,
+            # proportion 为地形类型比例；台阶高度最大 1.5 cm、随机格高度最大 1 cm，均使用米。
             sub_terrains={
                 "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.25),
                 "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
@@ -90,12 +93,14 @@ class MicroDuckVelocityRoughEnvCfg(MicroDuckVelocityFlatEnvCfg):
                 ),
             },
         )
+        # 传感器顺序必须与足部刚体顺序一致；同时更新 critic 与两个高度奖励，保持高度定义一致。
         height_sensor_names = ("left_foot_height", "right_foot_height")
         self.observations.critic.foot_height.params["height_sensor_names"] = height_sensor_names
         self.rewards.foot_clearance.params["height_sensor_names"] = height_sensor_names
         self.rewards.foot_swing_height.params["height_sensor_names"] = height_sensor_names
         self.scene.left_foot_height.update_period = self.sim.dt * self.decimation
         self.scene.right_foot_height.update_period = self.sim.dt * self.decimation
+        # 粗糙地形可能产生更多接触，增大接触与约束容量；这两项不是求解器迭代次数。
         self.sim.physics.solver_cfg.nconmax = 200
         self.sim.physics.solver_cfg.njmax = 1024
 
@@ -105,4 +110,5 @@ class MicroDuckVelocityRoughEnvCfg(MicroDuckVelocityFlatEnvCfg):
         self.scene.terrain.terrain_generator.curriculum = False
         self.scene.terrain.terrain_generator.num_rows = 5
         self.scene.terrain.terrain_generator.num_cols = 5
+        # 回放时停止按表现升降地形等级；继承的其他课程项并未在这里一并清空。
         self.curriculum.terrain_levels = None

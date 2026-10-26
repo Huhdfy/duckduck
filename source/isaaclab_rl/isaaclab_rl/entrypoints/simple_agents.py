@@ -28,6 +28,7 @@ from isaaclab.envs.utils.spaces import sample_space
 from isaaclab.utils import math as math_utils
 from isaaclab.utils import validate
 
+# 导入时注册 Gym 任务，后续才能通过任务名创建环境。
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
@@ -75,6 +76,7 @@ def run(argv: list[str] | None = None, *, policy: PolicyName) -> None:
     args_cli = _parse_args(argv, policy)
     torch.manual_seed(_SEED)
 
+    # 空字符串表示不加载训练算法配置；这里只需要环境配置。
     env_cfg, _ = resolve_task_config(args_cli.task, "")
     apply_env_overrides(args_cli, env_cfg)
     pre_launch_video_config(env_cfg, args_cli)
@@ -84,6 +86,7 @@ def run(argv: list[str] | None = None, *, policy: PolicyName) -> None:
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"Invalid environment configuration: {exc}") from None
 
+    # 先启动仿真后创建环境；退出时先关闭环境，再释放仿真上下文。
     with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
         log_dir = os.path.abspath(os.path.join("logs", f"{policy}_agent", normalize_task_name(args_cli.task)))
         apply_video_recording(env_cfg, log_dir, args_cli, subdir="play")
@@ -91,6 +94,7 @@ def run(argv: list[str] | None = None, *, policy: PolicyName) -> None:
         cleanup.callback(lambda: close_env(env))
         logger.info(f"Gym observation space: {env.observation_space}")
         logger.info(f"Gym action space: {env.action_space}")
+        # 初始化状态与观测；零动作和随机动作不依赖观测，因此不接收返回值。
         env.reset()
         if policy == "zero":
             action_policy = create_zero_action_policy(env)
@@ -98,6 +102,7 @@ def run(argv: list[str] | None = None, *, policy: PolicyName) -> None:
             action_policy = create_random_action_policy(env)
         logger.info(f"{policy.capitalize()} agent is running, press Ctrl+C to exit...")
 
+        # 同时设置步数和视频时长时，取较短预算；两者都未设置则不限制步数。
         budgets = [n for n in (args_cli.max_steps, video_playback_steps(args_cli, env_cfg)) if n is not None]
         max_steps = min(budgets, default=None)
 
@@ -109,6 +114,8 @@ def run(argv: list[str] | None = None, *, policy: PolicyName) -> None:
                 break
             step += 1
             with torch.inference_mode():
+                # 每次调用生成一批环境的动作；一个控制步可包含多个物理步。
+                # step 内仍计算观测、奖励与结束标志，但本流程不使用它们更新策略。
                 env.step(action_policy())
 
 
@@ -119,18 +126,21 @@ def create_zero_action_policy(env: gym.Env) -> Callable[[], Any]:
     other terms. Direct-workflow environments use zero-filled samples of their declared Gymnasium spaces, including
     composite and multi-agent spaces.
     """
+    # 去掉 Gym 包装层，访问真实环境的设备、动作管理器和并行环境数。
     unwrapped = env.unwrapped
     action_manager = getattr(unwrapped, "action_manager", None)
     if action_manager is not None:
         return _create_manager_zero_action_policy(action_manager, unwrapped)
 
     if isinstance(unwrapped.cfg, DirectMARLEnvCfg):
+        # 多智能体按 agent 分别返回动作；每份动作的首维都是并行环境数。
         actions = {
             agent: sample_space(space, unwrapped.device, batch_size=unwrapped.num_envs, fill_value=0)
             for agent, space in unwrapped.action_spaces.items()
         }
         return lambda: actions
 
+    # 固定零动作只分配一次，后续调用复用同一份数据。
     actions = sample_space(unwrapped.single_action_space, unwrapped.device, batch_size=unwrapped.num_envs, fill_value=0)
     return lambda: actions
 
@@ -145,6 +155,7 @@ def create_random_action_policy(env: gym.Env) -> Callable[[], torch.Tensor | dic
             for agent, space in unwrapped.action_spaces.items()
         }
 
+    # action_space 已含并行环境维度；每次调用重新采样，而非复用上一批随机动作。
     return lambda: 2 * torch.rand(env.action_space.shape, device=device) - 1
 
 
@@ -157,10 +168,13 @@ def _create_manager_zero_action_policy(action_manager: Any, env: Any) -> Callabl
         term = action_manager.get_term(term_name)
         term_policy = _create_action_term_zero_policy(term, env)
         if term_policy is not None:
+            # 各动作项按管理器顺序占据总动作向量中的连续列。
             term_policies.append((slice(index, index + term.action_dim), term_policy))
         index += term.action_dim
 
     def policy() -> torch.Tensor:
+        # 普通动作项保留零值；绝对位姿类动作项则根据当前状态生成保持目标。
+        # MicroDuck 的关节位置动作走零值分支，之后由动作项加上默认姿态等处理。
         actions.zero_()
         for action_slice, term_policy in term_policies:
             actions[:, action_slice] = term_policy()
@@ -173,6 +187,7 @@ def _create_manager_zero_action_policy(action_manager: Any, env: Any) -> Callabl
 
 def _create_action_term_zero_policy(term: Any, env: Any) -> Callable[[], torch.Tensor] | None:
     """Create the specialized zero-action policy required by an action term."""
+    # 检查整个继承链，使控制器的派生动作类也能匹配对应分支。
     term_types = {cls.__name__ for cls in type(term).__mro__}
 
     if "PinkInverseKinematicsAction" in term_types:
@@ -192,6 +207,7 @@ def _create_action_term_zero_policy(term: Any, env: Any) -> Callable[[], torch.T
 
         def pink_policy() -> torch.Tensor:
             frame_poses = term._asset.data.body_link_pose_w.torch[:, controlled_frame_ids].clone()
+            # 世界坐标减去各环境原点，得到该控制器使用的环境局部位置。
             frame_poses[..., :3] -= env.scene.env_origins.unsqueeze(1)
             hand_joint_positions = term._asset.data.joint_pos.torch[:, term._hand_joint_ids]
             return torch.cat((frame_poses.flatten(start_dim=1), hand_joint_positions), dim=-1)
@@ -203,6 +219,7 @@ def _create_action_term_zero_policy(term: Any, env: Any) -> Callable[[], torch.T
         def differential_ik_policy() -> torch.Tensor:
             ee_pos, ee_quat = term._compute_frame_pose()
             command = ee_pos if term.cfg.controller.command_type == "position" else torch.cat((ee_pos, ee_quat), dim=-1)
+            # 将当前末端位姿逆映射为原始动作，使处理后的目标仍是当前位姿。
             return _unscale_action(command - term._offset, term._scale)
 
         return differential_ik_policy
@@ -226,6 +243,7 @@ def _create_action_term_zero_policy(term: Any, env: Any) -> Callable[[], torch.T
                 ee_pos_task = term._ee_pose_b[:, :3]
                 ee_quat_task = term._ee_pose_b[:, 3:7]
             else:
+                # 控制目标必须表达在任务坐标系中，不能直接使用基座坐标系位姿。
                 ee_pos_task, ee_quat_task = math_utils.subtract_frame_transforms(
                     term._task_frame_pose_b[:, :3],
                     term._task_frame_pose_b[:, 3:7],
@@ -267,5 +285,6 @@ def _parse_args(argv: list[str] | None, policy: PolicyName) -> argparse.Namespac
     parser.set_defaults(device=None)
     args_cli, hydra_args = setup_preset_cli(parser, argv)
     enable_cameras_for_video(args_cli)
+    # argparse 消费启动参数，剩余配置覆盖项交给后续 Hydra 解析。
     sys.argv = [sys.argv[0]] + hydra_args
     return args_cli
