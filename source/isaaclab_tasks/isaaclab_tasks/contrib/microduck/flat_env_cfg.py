@@ -39,6 +39,7 @@ from isaaclab_assets.robots.microduck import (
 )
 
 from . import mdp
+from .mdp.diagnostics import MicroDuckRecordersCfg
 
 MICRODUCK_FOOT_BODY_NAMES = ["ankle_left", "ankle_right"]
 # 所有关节向量都按舵机顺序解析；足部列表也固定为左、右，须与奖励和传感器顺序一致。
@@ -61,7 +62,8 @@ MICRODUCK_SOLE_TO_ANKLE_OFFSET = 0.0225
 MICRODUCK_FOOT_TARGET_HEIGHT = 0.02 + MICRODUCK_SOLE_TO_ANKLE_OFFSET
 MICRODUCK_STEPS_PER_ITERATION = 24
 
-# 选择是否考虑齿轮间隙 
+
+# 选择是否考虑齿轮间隙
 def _backlash_preset(term, func=None, **params):
     """Use ``term`` as is, or with ``func`` and ``params`` for the backlash robot under ``presets=backlash``."""
     # 仅在 backlash 预设中替换函数或参数；编码器相关项需考虑舵机角与被动齿隙角之和。
@@ -74,12 +76,13 @@ def _backlash_preset(term, func=None, **params):
 @configclass
 class MicroDuckSceneCfg(InteractiveSceneCfg):
     """Scene with the MicroDuck robot on a ground plane."""
+
     # 地形
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
         collision_group=-1,
-        physics_material=RigidBodyMaterialBaseCfg(static_friction=1.0, dynamic_friction=1.0),# 摩擦系数
+        physics_material=RigidBodyMaterialBaseCfg(static_friction=1.0, dynamic_friction=1.0),  # 摩擦系数
         debug_vis=False,
     )
     robot = preset(
@@ -109,9 +112,9 @@ class CommandsCfg:
     base_velocity = mdp.MicroDuckVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(3.0, 8.0),
-        rel_standing_envs=0.02, # 原地不动
-        rel_forward_envs=0.2,#纯前进
-        rel_turn_in_place_envs=0.15,# 原地转弯
+        rel_standing_envs=0.02,  # 原地不动
+        rel_forward_envs=0.2,  # 纯前进
+        rel_turn_in_place_envs=0.15,  # 原地转弯
         debug_vis=True,
         ranges=mdp.MicroDuckVelocityCommandCfg.Ranges(
             lin_vel_x=(-0.4, 0.4), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-1.0, 1.0)
@@ -158,7 +161,7 @@ class ObservationsCfg:
             noise=mdp.ImuNoiseCfg(ang_vel=0.03, gravity=0.01),
         )
         # With backlash, encoders measure servo plus play angle.
-        #关节14
+        # 关节14
         joint_pos = _backlash_preset(
             ObsTerm(
                 func=mdp.joint_pos_rel_biased,
@@ -191,14 +194,15 @@ class ObservationsCfg:
 
     @configclass
     # 价值网络训练时可使用真实速度、足部接触等特权信息；部署 actor 只使用 policy 组。
-    #非对称的AC架构？
+    # 非对称的AC架构？
     class CriticCfg(ObsGroup):
         """Privileged observations for the value function (76 values)."""
-        '''多了 身体速度+左右脚高度+腾空时间+接触+接触力
-        '''
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel) # 身体线速度 3
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel) # 角 速度 3  两者都有
-        projected_gravity = ObsTerm(func=mdp.projected_gravity) # 重力方向
+
+        """多了 身体速度+左右脚高度+腾空时间+接触+接触力
+        """
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel)  # 身体线速度 3
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel)  # 角 速度 3  两者都有
+        projected_gravity = ObsTerm(func=mdp.projected_gravity)  # 重力方向
         joint_pos = _backlash_preset(
             ObsTerm(func=mdp.joint_pos_rel_biased, params={"asset_cfg": _SERVO_JOINT_CFG, "biased": False}),
             backlash_cfg=_PLAY_JOINT_CFG,
@@ -210,7 +214,7 @@ class ObservationsCfg:
         )
         actions = ObsTerm(func=mdp.last_action)
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
-        foot_height = ObsTerm(func=mdp.foot_height_safe, params={"asset_cfg": _FOOT_BODY_CFG}) #
+        foot_height = ObsTerm(func=mdp.foot_height_safe, params={"asset_cfg": _FOOT_BODY_CFG})  #
         foot_air_time = ObsTerm(func=mdp.foot_air_time_safe, params={"sensor_cfg": _FOOT_SENSOR_CFG})
         foot_contact = ObsTerm(func=mdp.foot_contact, params={"sensor_cfg": _FOOT_SENSOR_CFG})
         foot_contact_forces = ObsTerm(func=mdp.foot_contact_forces_safe, params={"sensor_cfg": _FOOT_SENSOR_CFG})
@@ -231,7 +235,7 @@ class EventsCfg:
 
     # startup 在环境初始化时随机化，reset 在对应环境重置时执行，interval 按时间间隔执行。
     # 例如编码器偏置在初始化后保持，而质心位置会在每次重置时重新采样。
-# 随机摩擦力
+    # 随机摩擦力
     foot_friction = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
@@ -262,7 +266,7 @@ class EventsCfg:
         mode="reset",
         params={
             "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.005, 0.005), "yaw": (-3.14, 3.14)},
-            #额外的位置偏差
+            # 额外的位置偏差
             "velocity_range": {},
         },
     )
@@ -448,11 +452,12 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     # 超时标记为时间截断，区别于摔倒等任务终止，供训练器正确处理价值估计。
-    time_out = DoneTerm(func=mdp.time_out, time_out=True) #区分
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)  # 区分
     fell_over = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": math.radians(70.0)})
     nan_state = DoneTerm(func=mdp.robot_state_is_nan, time_out=False, params={"sensor_names": ("contact_forces",)})
 
-# 课程学习 
+
+# 课程学习
 def _schedule(address: str, *stages: tuple[int, object]) -> CurrTerm:
     """Step ``address`` through ``(upstream_iteration, value)`` stages after its configured value."""
     return CurrTerm(
@@ -471,7 +476,8 @@ def _schedule(address: str, *stages: tuple[int, object]) -> CurrTerm:
 @configclass
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
-        # 第 xxx 轮
+
+    # 第 xxx 轮
     action_rate_weight = _schedule(
         "rewards.action_rate_l2.weight", (500, -0.2), (750, -0.4), (1000, -0.6), (1250, -0.8), (1500, -1.0)
     )
@@ -527,6 +533,7 @@ class MicroDuckVelocityFlatEnvCfg(ManagerBasedRLEnvCfg):
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
     rewards: RewardsCfg = RewardsCfg()
+    recorders: MicroDuckRecordersCfg = MicroDuckRecordersCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventsCfg = EventsCfg()
     curriculum: CurriculumCfg = CurriculumCfg()

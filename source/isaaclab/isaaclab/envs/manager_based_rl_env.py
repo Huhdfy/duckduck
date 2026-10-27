@@ -157,9 +157,11 @@ class ManagerBasedRLEnv(ManagerBasedEnv, gym.Env):
         }
         scalars = {
             "episode": {
-                "mean_reward": lambda: float(getattr(self, "reward_buf", None).mean())
-                if getattr(self, "reward_buf", None) is not None
-                else 0.0,
+                "mean_reward": lambda: (
+                    float(getattr(self, "reward_buf", None).mean())
+                    if getattr(self, "reward_buf", None) is not None
+                    else 0.0
+                ),
                 "episode_length": lambda: float(self.episode_length_buf.float().mean()),
             }
         }
@@ -238,7 +240,8 @@ class ManagerBasedRLEnv(ManagerBasedEnv, gym.Env):
 
         if len(self.recorder_manager.active_terms) > 0:
             # update observations for recording if needed
-            self.obs_buf = self.observation_manager.compute()
+            if self.recorder_manager.cfg.record_post_step_observations:
+                self.obs_buf = self.observation_manager.compute()
             self.recorder_manager.record_post_step()
 
         # -- reset envs that terminated/timed-out and log the episode information

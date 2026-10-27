@@ -22,6 +22,7 @@ class MicroDuckPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     # 此步数也用于课程阶段换算，修改时需同步考虑课程进度。
     num_steps_per_env = MICRODUCK_STEPS_PER_ITERATION
     max_iterations = 50000
+    # 保存间隔
     save_interval = 250
     experiment_name = preset(default="microduck_velocity_flat", backlash="microduck_velocity_flat_backlash")
     # actor 根据可部署观测生成动作，critic 利用特权观测估计价值；两者使用独立网络。

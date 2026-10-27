@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Compare five MicroDuck checkpoints on fixed straight-line velocity commands.
+"""Compare MicroDuck checkpoints on fixed straight-line velocity commands.
 
 Run from the repository root::
 
@@ -53,6 +53,7 @@ from tensordict import TensorDict
 from isaaclab_rl.entrypoints.common import dump_train_configs
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
+from isaaclab_tasks.contrib.microduck.mdp.diagnostics import DiagnosticAccumulator
 from isaaclab_tasks.utils import resolve_task_config
 
 TASK = "IsaacContrib-Velocity-Flat-MicroDuck"
@@ -169,7 +170,7 @@ def plot_results(summary: list[dict], output: Path) -> None:
 
 
 def main() -> None:
-    """Evaluate all checkpoints under paired reset seeds in one fixed randomized scene."""
+    """Evaluate paired checkpoints with pre-reset state, gait and actual reward contributions."""
     checkpoints = [args.run_dir / f"model_{i}.pt" for i in args.iterations]
     for path in checkpoints:
         if not path.is_file():
@@ -177,12 +178,18 @@ def main() -> None:
     output = args.output or Path("logs/evaluations/microduck_velocity") / datetime.now().strftime("%Y%m%d_%H%M%S")
     output.mkdir(parents=True, exist_ok=False)
     env_cfg, agent_cfg = resolve_task_config(TASK, "rsl_rl_cfg_entry_point", play_mode=True, overrides=())
+    # Replay only reward-weight schedules. Keep the previous evaluation's physical randomization protocol.
+    weight_schedules = [
+        term.params
+        for term in vars(env_cfg.curriculum).values()
+        if term is not None and term.params["address"].startswith("rewards.")
+    ]
     env_cfg.scene.num_envs = args.num_envs
-    env_cfg.episode_length_s = args.duration
+    env_cfg.episode_length_s = args.duration + 2 * env_cfg.sim.dt * env_cfg.decimation
     env_cfg.curriculum = None
     env_cfg.seed = args.seed
+    env_cfg.recorders.diagnostics.capture_samples = True
     env_cfg.events.push_robot = None
-    # Random starts at one heading simplify interpreting drift; reset physics randomization is retained.
     env_cfg.events.reset_base.params["pose_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
     command_cfg = env_cfg.commands.base_velocity
     command_cfg.rel_standing_envs = 0.0
@@ -208,45 +215,52 @@ def main() -> None:
             {"iteration": i, "path": str(p.resolve()), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
             for i, p in zip(args.iterations, checkpoints)
         ],
-        "protocol": "Deterministic actor; zero head/body commands; no pushes/curriculum; retained startup/reset "
-        "randomization; same scene and reset seed per speed across checkpoints. First failure ends scoring. "
-        "Internal autoresets are discarded. Stable metrics average each available trial equally; "
-        "trials failing before warmup have missing speed metrics but remain in completion denominator.",
+        "protocol": "Deterministic actor; zero head/body commands; no pushes; retained startup/reset randomization; "
+        "paired reset seeds and initial physical properties. Reward weights use checkpoint-stage schedules. "
+        "Samples are post-physics/post-reward, before reset/resampling; first failure ends scoring. "
+        "Warmup excludes t <= warmup_s. Primary velocity is root-link origin in body coordinates; COM velocity "
+        "is separately recorded. Means and RMS are computed per trial, then trials are equally weighted.",
+        "reward_units": "reward_weighted = weight * raw; reward_step = reward_weighted * step_dt; "
+        "sum(reward_step) equals returned environment reward. Zero-weight terms have zero contribution.",
+        "foot_definitions": "Contact force norm > 1 N at control frequency. Landing is ankle origin in world/body "
+        "frames. Sole-center horizontal speed during contact is a slip proxy. First/last incomplete stances "
+        "are censored; stance summary includes only complete stances within the scored interval.",
+        "joint_definitions": "joint_target is articulation position target after encoder-bias correction, "
+        "before BAM internal delay; joint_pos/vel are actual servo coordinates. Action order is servo order.",
     }
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    # Preserve modified source evidence alongside serialized effective configurations.
-    (output / "source.diff").write_bytes(subprocess.check_output(["git", "diff", "HEAD", "--", "source/"]))
+    (output / "source.diff").write_bytes(subprocess.check_output(["git", "diff", "HEAD", "--", "source/", "examples/"]))
+    (output / "evaluation_script.py").write_text(Path(__file__).read_text())
     dump_train_configs(str(output), env_cfg, agent_cfg)
-    trials = []
+    trials, diagnostic_trials, joint_trials, training_logs = [], [], [], []
     with launch_simulation(env_cfg, args):
         from isaaclab.envs import ManagerBasedRLEnv
 
         env = RslRlVecEnvWrapper(ManagerBasedRLEnv(cfg=env_cfg), clip_actions=agent_cfg.clip_actions)
         try:
-            raw = env.unwrapped
-            device = raw.device
+            raw, device = env.unwrapped, env.unwrapped.device
+            recorder = raw.recorder_manager._terms["diagnostics"]
             runner = OnPolicyRunner(env, to_dict(agent_cfg), log_dir=None, device=device)
             steps = math.ceil(args.duration / raw.step_dt)
             warmup_steps = math.ceil(args.warmup / raw.step_dt)
+            manifest["step_dt_s"] = raw.step_dt
+            manifest["joint_names"] = recorder.joint_names
+            manifest["reward_weights"] = {}
             baseline_initial = {}
             with gzip.open(output / "samples.csv.gz", "wt", newline="") as samples_file:
                 writer = csv.writer(samples_file)
-                writer.writerow(
-                    [
-                        "iteration",
-                        "target_mps",
-                        "env_id",
-                        "time_s",
-                        "vx_mps",
-                        "vy_mps",
-                        "yaw_rate_radps",
-                        "heading_error_deg",
-                        "stable_phase",
-                    ]
-                )
                 for iteration, checkpoint in zip(args.iterations, checkpoints):
                     runner.load(str(checkpoint))
                     policy = runner.get_inference_policy(device=device)
+                    for schedule in weight_schedules:
+                        _, name, _ = schedule["address"].split(".")
+                        cfg = raw.reward_manager.get_term_cfg(name)
+                        for start, value in schedule["modify_params"]["stages"]:
+                            if iteration * agent_cfg.num_steps_per_env >= start:
+                                cfg.weight = value
+                        raw.reward_manager.set_term_cfg(name, cfg)
+                    manifest["reward_weights"][str(iteration)] = {
+                        name: raw.reward_manager.get_term_cfg(name).weight for name in raw.reward_manager.active_terms
+                    }
                     for si, speed in enumerate(args.speeds):
                         raw.reset(seed=args.seed + si)
                         policy.reset(torch.ones(args.num_envs, dtype=torch.bool, device=device))
@@ -258,13 +272,11 @@ def main() -> None:
                                 robot.data.joint_pos.torch,
                                 robot.data.body_com_pose_b.torch.flatten(start_dim=1),
                                 robot.data.body_mass.torch,
-                                robot.data.joint_armature.torch,
                             ),
                             dim=1,
                         ).clone()
                         if si in baseline_initial:
-                            if not torch.allclose(initial, baseline_initial[si], atol=1e-6, rtol=0):
-                                raise RuntimeError("Paired initial poses or randomized physical properties differ.")
+                            torch.testing.assert_close(initial, baseline_initial[si], atol=1e-6, rtol=0)
                         else:
                             baseline_initial[si] = initial
                         initial_heading = robot.data.heading_w.torch.clone()
@@ -272,24 +284,40 @@ def main() -> None:
                         survival = torch.full((args.num_envs,), args.duration, device=device)
                         falls = torch.zeros_like(active)
                         broken = torch.zeros_like(active)
-                        # NaN masks retain explicit missingness after each trial's first failure.
-                        series = torch.full((steps, args.num_envs, 4), torch.nan, device=device)
-                        # Observation terms allocate mutable state lazily; no_grad keeps that state
-                        # writable when the next condition resets outside the rollout context.
+                        trace = None
+                        accumulator = None
                         with torch.no_grad():
                             for step in range(steps):
-                                velocity = robot.data.root_lin_vel_b.torch
-                                yaw_rate = robot.data.root_ang_vel_b.torch[:, 2]
-                                heading = robot.data.heading_w.torch - initial_heading
-                                heading = torch.atan2(torch.sin(heading), torch.cos(heading)).abs() * (180 / math.pi)
-                                state = torch.stack((velocity[:, 0], velocity[:, 1], yaw_rate, heading), dim=-1)
-                                series[step] = torch.where(active[:, None], state, torch.nan)
                                 command = raw.command_manager.get_command("base_velocity")
                                 command.zero_()
                                 command[:, 0] = speed
                                 obs = TensorDict(raw.observation_manager.compute(), batch_size=[args.num_envs])
-                                _, _, dones, _ = env.step(policy(obs))
+                                _, returned_reward, dones, _ = env.step(policy(obs))
                                 policy.reset(dones)
+                                if trace is None:
+                                    names = recorder.sample_names
+                                    columns = {name: i for i, name in enumerate(names)}
+                                    trace = torch.full((steps, args.num_envs, len(names)), torch.nan, device=device)
+                                    accumulator = DiagnosticAccumulator(args.num_envs, recorder.metric_names, device)
+                                    if not manifest.get("sample_columns"):
+                                        manifest["sample_columns"] = names
+                                        writer.writerow(
+                                            ["iteration", "target_mps", "env_id", "time_s", "stable_phase", *names]
+                                        )
+                                trace[step] = torch.where(active[:, None], recorder.snapshot, torch.nan)
+                                torch.testing.assert_close(
+                                    recorder.snapshot[:, columns["reward_total_step"]], returned_reward, equal_nan=True
+                                )
+                                if step >= warmup_steps:
+                                    metrics = recorder.metric_values.clone()
+                                    for side in ("left", "right"):
+                                        index = recorder.metric_names.index(f"{side}_stance_duration_mean_s")
+                                        metrics[:, index] = torch.where(
+                                            metrics[:, index] <= (step + 1) * raw.step_dt - args.warmup,
+                                            metrics[:, index],
+                                            torch.nan,
+                                        )
+                                    accumulator.update(metrics, active)
                                 failed = active & raw.reset_terminated
                                 survival[failed] = (step + 1) * raw.step_dt
                                 falls |= failed & raw.termination_manager.get_term("fell_over")
@@ -297,57 +325,113 @@ def main() -> None:
                                 active &= ~failed
                                 if not active.any():
                                     break
-                        data = series.cpu().numpy()
-                        survival_np, falls_np, broken_np = (
-                            survival.cpu().numpy(),
-                            falls.cpu().numpy(),
-                            broken.cpu().numpy(),
-                        )
+                        data = trace.cpu().numpy()
+                        diagnostics = accumulator.values().cpu().numpy()
+                        counts = accumulator.counts.cpu().numpy()
+                        survival_np, falls_np, broken_np = (x.cpu().numpy() for x in (survival, falls, broken))
                         for eid in range(args.num_envs):
                             stable = data[warmup_steps:, eid]
-                            stable = stable[np.isfinite(stable).all(axis=1)]
+                            valid = np.isfinite(stable[:, columns["link_vx_b_mps"]])
+                            stable = stable[valid]
+                            vx, vy = stable[:, columns["link_vx_b_mps"]], stable[:, columns["link_vy_b_mps"]]
+                            heading = stable[:, columns["heading_w_rad"]] - float(initial_heading[eid])
+                            heading = np.abs(np.arctan2(np.sin(heading), np.cos(heading))) * 180 / math.pi
+                            identity = {"iteration": iteration, "target_mps": speed, "env_id": eid}
                             trials.append(
                                 {
-                                    "iteration": iteration,
-                                    "target_mps": speed,
-                                    "env_id": eid,
+                                    **identity,
                                     "seed": args.seed + si,
                                     "completed": int(not (falls_np[eid] or broken_np[eid])),
                                     "survival_s": float(survival_np[eid]),
                                     "fell_over": int(falls_np[eid]),
                                     "nan_state": int(broken_np[eid]),
                                     "stable_samples": len(stable),
-                                    "mean_vx_mps": float(stable[:, 0].mean()) if len(stable) else math.nan,
-                                    "planar_error_mps": float(np.hypot(stable[:, 0] - speed, stable[:, 1]).mean())
+                                    "mean_vx_mps": float(vx.mean()) if len(stable) else math.nan,
+                                    "planar_error_mps": float(np.hypot(vx - speed, vy).mean())
                                     if len(stable)
                                     else math.nan,
-                                    "vx_sd_mps": float(stable[:, 0].std()) if len(stable) else math.nan,
-                                    "heading_error_deg": float(stable[:, 3].mean()) if len(stable) else math.nan,
+                                    "vx_sd_mps": float(vx.std()) if len(stable) else math.nan,
+                                    "heading_error_deg": float(heading.mean()) if len(stable) else math.nan,
                                 }
                             )
+                            diagnostic_trials.append(
+                                {
+                                    **identity,
+                                    **dict(zip(recorder.metric_names, diagnostics[eid].tolist())),
+                                    **{
+                                        f"count/{name}": int(count)
+                                        for name, count in zip(recorder.metric_names, counts[eid])
+                                    },
+                                }
+                            )
+                            for joint in recorder.joint_names:
+                                target = stable[:, columns[f"joint_target/{joint}"]]
+                                actual = stable[:, columns[f"joint_pos/{joint}"]]
+                                joint_trials.append(
+                                    {
+                                        **identity,
+                                        "joint": joint,
+                                        "target_sd_rad": float(target.std()) if len(stable) else math.nan,
+                                        "actual_sd_rad": float(actual.std()) if len(stable) else math.nan,
+                                        "target_range_rad": float(np.ptp(target)) if len(stable) else math.nan,
+                                        "actual_range_rad": float(np.ptp(actual)) if len(stable) else math.nan,
+                                        "error_mean_rad": float((target - actual).mean()) if len(stable) else math.nan,
+                                        "error_rms_rad": float(np.sqrt(np.mean((target - actual) ** 2)))
+                                        if len(stable)
+                                        else math.nan,
+                                    }
+                                )
                             for step in range(steps):
-                                if np.isfinite(data[step, eid]).all():
+                                if np.isfinite(data[step, eid, columns["command_x"]]):
                                     writer.writerow(
                                         [
                                             iteration,
                                             speed,
                                             eid,
-                                            round(step * raw.step_dt, 6),
-                                            *data[step, eid].tolist(),
+                                            round((step + 1) * raw.step_dt, 6),
                                             int(step >= warmup_steps),
+                                            *data[step, eid].tolist(),
                                         ]
                                     )
-                        group = trials[-args.num_envs :]
+                        # Exercise the same episode-log path used by training, including surviving episodes.
+                        raw.reset(seed=args.seed + si)
+                        training_logs.append(
+                            {
+                                "iteration": iteration,
+                                "target_mps": speed,
+                                "values": {
+                                    key: float(value)
+                                    for key, value in raw.extras["log"].items()
+                                    if key.startswith("Diagnostics/")
+                                },
+                            }
+                        )
                         print(
-                            f"Checkpoint {iteration:5d}, target {speed:.1f}: "
-                            f"{sum(r['completed'] for r in group)}/{args.num_envs} completed",
+                            f"Checkpoint {iteration}, target {speed:.1f}: "
+                            f"{sum(r['completed'] for r in trials[-args.num_envs :])}/{args.num_envs} completed",
                             flush=True,
                         )
                         write_csv(output / "trials.csv", trials)
+                        write_csv(output / "diagnostic_trials.csv", diagnostic_trials)
+                        write_csv(output / "joint_trials.csv", joint_trials)
+                        (output / "manifest.json").write_text(json.dumps(manifest, indent=2))
+                        (output / "training_log_samples.json").write_text(json.dumps(training_logs, indent=2))
         finally:
             env.close()
     summary = summarize(trials)
     write_csv(output / "summary.csv", summary)
+    diagnostic_summary = []
+    for iteration in args.iterations:
+        for speed in args.speeds:
+            group = [r for r in diagnostic_trials if r["iteration"] == iteration and r["target_mps"] == speed]
+            diagnostic_summary.append(
+                {
+                    "iteration": iteration,
+                    "target_mps": speed,
+                    **{name: finite_mean([r[name] for r in group]) for name in recorder.metric_names},
+                }
+            )
+    write_csv(output / "diagnostic_summary.csv", diagnostic_summary)
     plot_results(summary, output)
     print(f"Evaluation complete: {output.resolve()}", flush=True)
 

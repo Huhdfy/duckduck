@@ -74,6 +74,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Restore the policy optimizer; disable to keep a fresh optimizer and configured learning rate.",
     )
     cli_args.add_rsl_rl_args(parser)
+    parser.add_argument(
+        "--resume_env_steps",
+        type=int,
+        default=None,
+        help="Completed environment control steps to restore for step-based curricula when resuming a checkpoint.",
+    )
     add_launcher_args(parser)
     remaining_args_env_registration = cli_args.register_external_tasks(argv)
     args_cli, remaining_args = setup_preset_cli(parser, argv)
@@ -151,6 +157,9 @@ def _run(args_cli: argparse.Namespace) -> None:
                 write_run_manifest(log_dir, library="rsl_rl", task=args_cli.task, metadata={"agent": args_cli.agent})
 
             resume_path = _resolve_checkpoint(args_cli, agent_cfg, log_root_path)
+            if args_cli.resume_env_steps is not None:
+                if resume_path is None or args_cli.resume_env_steps < 0:
+                    raise ValueError("--resume_env_steps requires a checkpoint and a non-negative step count.")
             env_cfg.log_dir = rank_dir
             apply_video_recording(env_cfg, rank_dir, args_cli)
 
@@ -162,6 +171,12 @@ def _run(args_cli: argparse.Namespace) -> None:
                 convert_marl_to_single_agent=isinstance(env_cfg, DirectMARLEnvCfg),
             )
             cleanup.callback(lambda: close_env(env))
+            if args_cli.resume_env_steps is not None:
+                if not hasattr(env.unwrapped, "common_step_counter"):
+                    raise ValueError("--resume_env_steps requires an environment with common_step_counter.")
+                # The RSL-RL wrapper resets the environment below, applying curricula before reset events.
+                env.unwrapped.common_step_counter = args_cli.resume_env_steps
+                logger.info(f"Restored curriculum control step: {args_cli.resume_env_steps}")
             env = wrap_sensor_capture(env, rank_dir, args_cli)
 
             screen.stage("Preparing agent")

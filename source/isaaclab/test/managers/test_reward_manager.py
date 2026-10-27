@@ -108,6 +108,10 @@ def test_compute():
         env.step = step
         torch.testing.assert_close(rew_man.compute(dt=dt), torch.tensor(expected))
 
+    torch.testing.assert_close(
+        rew_man.weighted_term_values, torch.tensor([[0.0, 4.0, 0.0], [-4.0, 4.0, 0.0], [-8.0, 4.0, 0.0]])
+    )
+
     reset_env_2 = rew_man.reset(torch.tensor([2]))
     assert {name: value.item() for name, value in reset_env_2.items()} == {
         "Episode_Reward/scaled": -1.5,

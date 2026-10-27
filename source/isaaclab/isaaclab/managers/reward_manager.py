@@ -96,6 +96,15 @@ class RewardManager(ManagerBase):
         """Name of active reward terms."""
         return self._term_names
 
+    @property
+    def weighted_term_values(self) -> torch.Tensor:
+        """Latest ``weight * value`` for each environment and active term, before multiplication by ``dt``.
+
+        The returned buffer is owned by the manager and must not be modified. Copy it to retain a step's values.
+        Reading it does not evaluate reward functions again, including stateful terms.
+        """
+        return self._step_reward
+
     """
     Operations.
     """

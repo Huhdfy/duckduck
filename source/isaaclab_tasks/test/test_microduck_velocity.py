@@ -22,6 +22,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab.test.utils import DeviceScope, test_devices
 
 import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.contrib.microduck.mdp.diagnostics import DiagnosticAccumulator
 from isaaclab_tasks.contrib.microduck.mdp.observations import foot_height_safe
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
@@ -51,7 +52,7 @@ def _make_env(task: str, device: str, num_envs: int, overrides: tuple[str, ...] 
 @pytest.mark.integration
 @pytest.mark.kitless
 @pytest.mark.parametrize("device", test_devices(DeviceScope.CUDA))
-def test_microduck_deploy_interface_and_friction_reset(device):
+def test_microduck_deploy_interface_and_friction_reset(device, monkeypatch):
     """The deployed policy's 61/76 inputs and joint order hold, resets redraw BAM friction, and steps stay finite.
 
     A diverged state terminates only its environment, whose final reward and reset observations stay finite.
@@ -74,11 +75,26 @@ def test_microduck_deploy_interface_and_friction_reset(device):
         assert (after == after[:, :1]).all(), "one friction scale per environment"
         assert ((after >= 0.9) & (after <= 1.1)).all()
 
+        observation_calls = []
+        compute_observations = env.observation_manager.compute
+
+        def counted_observations(*args, **kwargs):
+            observation_calls.append(1)
+            return compute_observations(*args, **kwargs)
+
+        monkeypatch.setattr(env.observation_manager, "compute", counted_observations)
+        yaw_errors = []
         with torch.inference_mode():
             for _ in range(20):
+                command = env.command_manager.get_command("base_velocity")[:, 2].clone()
                 obs, reward, *_ = env.step(torch.randn(2, 14, device=env.device) * 0.1)
                 assert all(torch.isfinite(value).all() for value in obs.values())
                 assert torch.isfinite(reward).all()
+                yaw_errors.append(robot.data.root_link_ang_vel_b.torch[:, 2].clone() - command)
+            assert len(observation_calls) == 20, "state-only recording must not draw extra observation noise"
+            _, info = env.reset()
+            expected_rms = torch.stack(yaw_errors).square().mean(dim=0).sqrt().mean()
+            torch.testing.assert_close(info["log"]["Diagnostics/all/yaw_error_rms_radps"], expected_rms)
             # A diverged state terminates, and its final reward stays finite although rewards precede resets.
             nan = torch.full((1, 1), float("nan"), device=env.device)
             robot.write_joint_velocity_to_sim_index(velocity=nan, joint_ids=[0], env_ids=[0])
@@ -89,6 +105,17 @@ def test_microduck_deploy_interface_and_friction_reset(device):
     finally:
         env.close()
         SimulationContext.clear_instance()
+
+
+def test_microduck_diagnostic_reductions_and_partial_reset():
+    """Opposite errors retain nonzero RMS; sparse events and partial resets preserve their own denominators."""
+    stats = DiagnosticAccumulator(2, ["yaw_mean_radps", "yaw_rms_radps", "stance_mean_s"], "cpu")
+    stats.update(torch.tensor([[1.0, 1.0, torch.nan], [2.0, 2.0, 0.2]]), torch.tensor([True, True]))
+    stats.update(torch.tensor([[-1.0, -1.0, 0.4], [9.0, 9.0, 0.8]]), torch.tensor([True, False]))
+    torch.testing.assert_close(stats.values(), torch.tensor([[0.0, 1.0, 0.4], [2.0, 2.0, 0.2]]))
+    stats.reset([0])
+    assert torch.isnan(stats.values()[0]).all()
+    torch.testing.assert_close(stats.values()[1], torch.tensor([2.0, 2.0, 0.2]))
 
 
 def test_microduck_foot_height_on_steps():

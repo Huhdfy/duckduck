@@ -57,6 +57,12 @@ class RecorderManagerBaseCfg:
     dataset_compression: bool = True
     """Enable dataset compression."""
 
+    record_post_step_observations: bool = True
+    """Refresh observations before post-step recording.
+
+    Disable for state-only diagnostics to avoid extra noise draws.
+    """
+
 
 class RecorderTerm(ManagerTermBase):
     """Base class for recorder terms.
@@ -587,6 +593,7 @@ class RecorderManager(ManagerBase):
                 "export_in_record_pre_reset",
                 "export_in_close",
                 "dataset_compression",
+                "record_post_step_observations",
             ]:
                 continue
             # check if term config is None
