@@ -8,11 +8,13 @@ __all__ = [
     "BiasedJointPositionAction",
     "BiasedJointPositionActionCfg",
     # commands
+    "MicroDuckRoughVelocityCommand",
     "MicroDuckVelocityCommand",
     "MicroDuckVelocityCommandCfg",
     "UniformPoseDeltaCommand",
     "UniformPoseDeltaCommandCfg",
     # curriculums
+    "microduck_terrain_levels",
     "staged_value",
     # events
     "randomize_bam_friction",
@@ -40,7 +42,9 @@ __all__ = [
     "joint_tracking_error_l2",
     "self_collision_cost",
     "track_angular_velocity",
+    "track_angular_velocity_world",
     "track_linear_velocity",
+    "track_linear_velocity_heading",
     "upright",
     # terminations
     "robot_state_is_nan",
@@ -48,12 +52,13 @@ __all__ = [
 
 from .actions import BiasedJointPositionAction, BiasedJointPositionActionCfg
 from .commands import (
+    MicroDuckRoughVelocityCommand,
     MicroDuckVelocityCommand,
     MicroDuckVelocityCommandCfg,
     UniformPoseDeltaCommand,
     UniformPoseDeltaCommandCfg,
 )
-from .curriculums import staged_value
+from .curriculums import microduck_terrain_levels, staged_value
 from .events import randomize_bam_friction, randomize_encoder_bias
 from .observations import (
     ImuNoiseCfg,
@@ -79,7 +84,9 @@ from .rewards import (
     joint_tracking_error_l2,
     self_collision_cost,
     track_angular_velocity,
+    track_angular_velocity_world,
     track_linear_velocity,
+    track_linear_velocity_heading,
     upright,
 )
 from .terminations import robot_state_is_nan

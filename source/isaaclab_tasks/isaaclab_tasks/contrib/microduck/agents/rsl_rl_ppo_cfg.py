@@ -21,9 +21,9 @@ class MicroDuckPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     # 每轮每个环境采样 24 个控制步；4096 个环境合计 98304 条转移，再用于 PPO 更新。
     # 此步数也用于课程阶段换算，修改时需同步考虑课程进度。
     num_steps_per_env = MICRODUCK_STEPS_PER_ITERATION
-    max_iterations = 50000
-    # 保存间隔
-    save_interval = 250
+    max_iterations = "${microduck_scale:50000,${env.ngpus},${env.nnodes}}"
+    # 保存间隔；多 GPU 时按总进程数缩放。
+    save_interval = "${microduck_scale:250,${env.ngpus},${env.nnodes}}"
     experiment_name = preset(default="microduck_velocity_flat", backlash="microduck_velocity_flat_backlash")
     # actor 根据可部署观测生成动作，critic 利用特权观测估计价值；两者使用独立网络。
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}

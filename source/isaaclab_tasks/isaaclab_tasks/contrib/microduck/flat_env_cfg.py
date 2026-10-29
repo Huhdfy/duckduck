@@ -6,8 +6,10 @@
 """Flat walking recipe ported from pollen-robotics/microduck_rl and the original Lab task."""
 
 import math
+import os
 
 from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg, NewtonCollisionPipelineCfg, NewtonShapeCfg
+from omegaconf import OmegaConf
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
@@ -61,6 +63,21 @@ MICRODUCK_SOLE_TO_ANKLE_OFFSET = 0.0225
 # 奖励读取踝部坐标系高度：脚底离地 2 cm 还需加上脚底到踝部原点的偏移。
 MICRODUCK_FOOT_TARGET_HEIGHT = 0.02 + MICRODUCK_SOLE_TO_ANKLE_OFFSET
 MICRODUCK_STEPS_PER_ITERATION = 24
+
+
+def _scale_multi_gpu(steps: int, ngpus: int | None, nnodes: int | None) -> int:
+    """Scale a sample milestone by total ranks, or an explicit paired GPU/node override."""
+    if ngpus is None and nnodes is None:
+        ngpus, nnodes = int(os.environ.get("WORLD_SIZE", "1")), 1
+    elif ngpus is None or nnodes is None:
+        raise ValueError("Set env.ngpus and env.nnodes together, or leave both unset to use WORLD_SIZE.")
+    for name, count in (("ngpus", ngpus), ("nnodes", nnodes)):
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    return math.ceil(steps / (ngpus * nnodes))
+
+
+OmegaConf.register_resolver("microduck_scale", _scale_multi_gpu, replace=True)
 
 
 # 选择是否考虑齿轮间隙
@@ -329,21 +346,21 @@ class RewardsCfg:
     # TensorBoard 的 Episode_Reward/<名称> 是结束回合的加权累计贡献均值 / 最大回合时长 20 s，
     # 不是原始函数值，也不是除以实际存活时间的均值；回合变长会同时放大正奖励和负代价的累计量。
     # 下方“趋近 0/上升更好”均需在相近回合长度、任务分布和权重下比较，不能只看单条曲线。
-    # 线速度跟随：奖励 exp(-(平面跟踪误差² + 竖直速度²)/std²)，原始值在 [0, 1]。
-    # 同等回合长度下，日志上升通常表示跟踪改善、竖直跳动减少；也应对照 error_vel_xy。
+    # 线速度跟随：在仅含偏航旋转的航向坐标系中计算水平误差，奖励 exp(-水平误差²/std²)。
+    # 原始值在 [0, 1]，不包含竖直速度；与旧版机体系三维速度奖励口径不同。
     track_lin_vel = RewTerm(
-        func=mdp.track_linear_velocity, weight=2.0, params={"command_name": "base_velocity", "std": math.sqrt(0.1)}
+        func=mdp.track_linear_velocity_heading, weight=4.0, params={"command_name": "base_velocity", "std": 0.15}
     )
-    # 角速度跟随：奖励目标偏航角速度，同时抑制机体横滚、俯仰角速度；原始值在 [0, 1]。
-    # 日志越高通常越好；与 error_vel_yaw 不完全等价，后者只衡量偏航跟踪误差。
+    # 角速度跟随：仅奖励世界坐标系 z 轴角速度跟踪，原始值在 [0, 1]。
+    # 横滚、俯仰角速度由其他项约束；与旧版机体系三维角速度奖励口径不同。
     track_ang_vel = RewTerm(
-        func=mdp.track_angular_velocity, weight=2.0, params={"command_name": "base_velocity", "std": math.sqrt(0.5)}
+        func=mdp.track_angular_velocity_world, weight=4.0, params={"command_name": "base_velocity", "std": 0.35}
     )
     # 直立奖励：躯干坐标系中重力的水平分量越小，奖励越高；不约束航向。
     # 它不能单独区分正立与倒立，需配合 fell_over；日志上升也可能来自回合变长。
     upright = RewTerm(func=mdp.upright, weight=2.0, params={"std": math.sqrt(0.05), "asset_cfg": _TRUNK_BODY_CFG})
     # 腿部姿态奖励：按各关节容差归一化偏离默认站姿的误差，再计算指数奖励。
-    # 目标运动指令超过阈值时使用 walking 容差；容差不是硬限位，过度追求此项可能限制迈步。
+    # 上游 standing_only=True：目标运动指令超过阈值时该奖励为零；容差不是硬限位。
     pose = RewTerm(
         func=mdp.joint_deviation_exp,
         weight=1.0,
@@ -353,6 +370,7 @@ class RewardsCfg:
             "std_walking": {".*hip_yaw": 0.3, ".*hip_roll": 0.05, ".*hip_pitch": 0.4, ".*knee": 0.4, ".*ankle": 0.25},
             "walking_threshold": 0.01,
             "asset_cfg": SceneEntityCfg("robot", joint_names=MICRODUCK_LEG_JOINT_NAMES, preserve_order=True),
+            "standing_only": True,
         },
     )
     # 平方和 抑制晃动
@@ -370,7 +388,7 @@ class RewardsCfg:
         RewTerm(func=mdp.joint_pos_limits_finite, weight=-1.0), asset_cfg=_SERVO_JOINT_CFG
     )
     # 动作突变代价：sum((本次动作 - 上次动作)²)，没有除以控制周期。
-    # 课程会在 500/750/1000/1250/1500 轮加重负权重；曲线骤降未必是动作变差。
+    # 单 GPU 课程在 3000/4000/5000/6000/7000 轮加重负权重；曲线骤降未必是动作变差。
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.1)
 
     # 腾空窗口奖励：有运动指令时，每只脚当前腾空时间严格处于 0.125–0.3 s 才计 1 分。
@@ -463,14 +481,17 @@ class TerminationsCfg:
 # 课程学习
 def _schedule(address: str, *stages: tuple[int, object]) -> CurrTerm:
     """Step ``address`` through ``(upstream_iteration, value)`` stages after its configured value."""
+    steps = [(iteration * MICRODUCK_STEPS_PER_ITERATION, value) for iteration, value in stages]
     return CurrTerm(
         func=mdp.modify_term_cfg,
         params={
             "address": address,
             "modify_fn": mdp.staged_value,
             "modify_params": {
-                # 课程按环境控制步计数；每轮 PPO 采样 24 步，因此用迭代数 × 24 转换，勿乘并行环境数。
-                "stages": [(iteration * MICRODUCK_STEPS_PER_ITERATION, value) for iteration, value in stages]
+                # 课程按控制步计数：迭代数 × 24，再按 GPU 总进程数缩放，勿乘并行环境数。
+                "stages": [
+                    (f"${{microduck_scale:{step},${{env.ngpus}},${{env.nnodes}}}}", value) for step, value in steps
+                ]
             },
         },
     )
@@ -482,7 +503,7 @@ class CurriculumCfg:
 
     # 第 xxx 轮
     action_rate_weight = _schedule(
-        "rewards.action_rate_l2.weight", (500, -0.2), (750, -0.4), (1000, -0.6), (1250, -0.8), (1500, -1.0)
+        "rewards.action_rate_l2.weight", (3000, -0.2), (4000, -0.4), (5000, -0.6), (6000, -0.8), (7000, -1.0)
     )
     head_pose_bias_weight = _schedule("rewards.head_pose_bias.weight", (600, -1.0), (1000, -2.0), (1500, -3.0))
     standing_envs = _schedule(
@@ -511,6 +532,12 @@ class CurriculumCfg:
 @configclass
 class MicroDuckVelocityFlatEnvCfg(ManagerBasedRLEnvCfg):
     """MicroDuck flat velocity walking with Newton MJWarp and BAM servos."""
+
+    ngpus: int | None = None
+    """Optional GPUs per node for recipe scaling. Set together with :attr:`nnodes` to override ``WORLD_SIZE``."""
+
+    nnodes: int | None = None
+    """Optional node count for recipe scaling. Set together with :attr:`ngpus` to override ``WORLD_SIZE``."""
 
     sim: SimulationCfg = SimulationCfg(
         physics=NewtonCfg(

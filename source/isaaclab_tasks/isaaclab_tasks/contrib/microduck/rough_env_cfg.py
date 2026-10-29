@@ -14,9 +14,9 @@ from isaaclab.managers import CurriculumTermCfg
 from isaaclab.sensors import RayCasterCfg, patterns
 from isaaclab.utils import configclass
 
-from isaaclab_tasks.core.velocity.mdp.curriculums import terrain_levels_vel
-
 from .flat_env_cfg import CurriculumCfg, MicroDuckSceneCfg, MicroDuckVelocityFlatEnvCfg
+from .mdp.commands import MicroDuckRoughVelocityCommand, MicroDuckVelocityCommand
+from .mdp.curriculums import microduck_terrain_levels
 
 
 class MicroDuckTerrainImporter(terrain_gen.TerrainImporter):
@@ -51,9 +51,9 @@ class MicroDuckRoughSceneCfg(MicroDuckSceneCfg):
 
 @configclass
 class MicroDuckRoughCurriculumCfg(CurriculumCfg):
-    """Progress through terrain difficulty according to distance walked."""
+    """Progress through terrain difficulty after successful walking episodes."""
 
-    terrain_levels = CurriculumTermCfg(func=terrain_levels_vel)
+    terrain_levels = CurriculumTermCfg(func=microduck_terrain_levels)
 
 
 @configclass
@@ -66,6 +66,7 @@ class MicroDuckVelocityRoughEnvCfg(MicroDuckVelocityFlatEnvCfg):
     def __post_init__(self):
         # 先继承平地任务的控制频率、动作和观测接口，再覆盖地形及相关奖励参数。
         super().__post_init__()
+        self.commands.base_velocity.class_type = MicroDuckRoughVelocityCommand
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.class_type = MicroDuckTerrainImporter
         self.scene.terrain.max_init_terrain_level = 5
@@ -107,6 +108,7 @@ class MicroDuckVelocityRoughEnvCfg(MicroDuckVelocityFlatEnvCfg):
     def play_mode(self):
         """Use a smaller terrain map with randomly sampled difficulty for playback."""
         super().play_mode()
+        self.commands.base_velocity.class_type = MicroDuckVelocityCommand
         self.scene.terrain.terrain_generator.curriculum = False
         self.scene.terrain.terrain_generator.num_rows = 5
         self.scene.terrain.terrain_generator.num_cols = 5
