@@ -451,17 +451,20 @@ def show_run_summary(
     """
     renderer = _renderer_name(env_cfg)
     visualizers = [cfg.backend.visualizer_type for cfg in env_cfg.sim.visualizer_cfgs]
+    zh = getattr(args_cli, "log_language", "en") == "zh"
     screen.summary(
-        f"Isaac Lab · {action}",
+        "Isaac Lab · 训练" if zh and action == "train" else f"Isaac Lab · {action}",
         {
-            "Task": args_cli.task,
-            "Workflow": _workflow_name(env_cfg),
-            "RL library": library,
-            "Physics": _physics_backend_name(env_cfg.sim.physics),
-            "Renderer": "n/a (no camera sensors)" if renderer is None else renderer,
-            "Visualizer": ", ".join(visualizers) or "headless",
-            "Device": env_cfg.sim.device,
-            "Environments": str(getattr(args_cli, "num_envs", None) or env_cfg.scene.num_envs),
+            "任务" if zh else "Task": args_cli.task,
+            "工作流" if zh else "Workflow": _workflow_name(env_cfg),
+            "训练库" if zh else "RL library": library,
+            "物理后端" if zh else "Physics": _physics_backend_name(env_cfg.sim.physics),
+            "渲染器" if zh else "Renderer": ("无相机" if zh else "n/a (no camera sensors)")
+            if renderer is None
+            else renderer,
+            "可视化" if zh else "Visualizer": ", ".join(visualizers) or ("无窗口" if zh else "headless"),
+            "设备" if zh else "Device": env_cfg.sim.device,
+            "并行环境数" if zh else "Environments": str(getattr(args_cli, "num_envs", None) or env_cfg.scene.num_envs),
         },
     )
 

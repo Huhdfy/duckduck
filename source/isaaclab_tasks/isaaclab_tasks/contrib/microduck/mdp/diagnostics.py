@@ -70,6 +70,9 @@ class MicroDuckDiagnostics(RecorderTerm):
         self.sample_names: list[str] = []
         self.metric_names: list[str] = []
         self.metric_values = None
+        self.tracking_tolerance = (
+            torch.tensor(cfg.tracking_tolerance, device=env.device) if cfg.tracking_tolerance is not None else None
+        )
         self.accumulators: dict[str, DiagnosticAccumulator] = {}
 
     def record_post_step(self):
@@ -80,9 +83,15 @@ class MicroDuckDiagnostics(RecorderTerm):
         angular = data.root_link_ang_vel_b.torch
         yaw_error = angular[:, 2] - command[:, 2]
         roll_pitch_sq = angular[:, :2].square().sum(dim=1)
-        std = env.reward_manager.get_term_cfg("track_ang_vel").params["std"]
+        angular_params = env.reward_manager.get_term_cfg("track_ang_vel").params
+        std = angular_params["std"]
         yaw_factor = torch.exp(-yaw_error.square() / std**2)
         roll_pitch_factor = torch.exp(-roll_pitch_sq / std**2)
+        angular_raw = (
+            1.0 / (1.0 + (yaw_error.square() + roll_pitch_sq) / std**2)
+            if angular_params.get("shape", "exponential") == "rational"
+            else yaw_factor * roll_pitch_factor
+        )
         root_pos = data.root_link_pos_w.torch
         root_quat = data.root_link_quat_w.torch
         foot_pos = data.body_link_pos_w.torch[:, self.foot_ids]
@@ -130,25 +139,33 @@ class MicroDuckDiagnostics(RecorderTerm):
             roll_pitch_sq_mean_rad2ps2=roll_pitch_sq,
             yaw_factor_mean=yaw_factor,
             roll_pitch_factor_mean=roll_pitch_factor,
-            angular_reward_raw_mean=yaw_factor * roll_pitch_factor,
+            angular_reward_raw_mean=angular_raw,
         )
         samples["yaw_error_radps"] = yaw_error
         samples["roll_pitch_sq_rad2ps2"] = roll_pitch_sq
         samples["yaw_factor"] = yaw_factor
         samples["roll_pitch_factor"] = roll_pitch_factor
-        samples["angular_reward_raw"] = yaw_factor * roll_pitch_factor
+        samples["angular_reward_raw"] = angular_raw
         for i, name in enumerate(env.reward_manager.active_terms):
             weighted = env.reward_manager.weighted_term_values[:, i]
             metrics[f"reward_weighted/{name}"] = weighted
             samples[f"reward_weighted/{name}"] = weighted
             samples[f"reward_step/{name}"] = weighted * env.step_dt
         samples["reward_total_step"] = env.reward_buf
+        if self.cfg.capture_samples:
+            for name in env.termination_manager.active_terms:
+                samples[f"termination/{name}"] = env.termination_manager.get_term(name).float()
         metrics["reward_weighted/total"] = env.reward_manager.weighted_term_values.sum(dim=1)
 
-        targets = self.robot.actuators.target_command.position.torch[:, self.joint_ids]
+        targets = env.action_manager.get_term("joint_pos").physical_targets
         positions = data.joint_pos.torch[:, self.joint_ids]
         velocities = data.joint_vel.torch[:, self.joint_ids]
         actions = env.action_manager.action
+        if self.tracking_tolerance is not None:
+            tolerance = self.tracking_tolerance
+            error = (targets - positions).abs()
+            metrics["tracking_exceedance_fraction"] = (error > tolerance).float().mean(dim=1)
+            metrics["tracking_deadzone_cost"] = ((error - tolerance).clamp_min(0) / 0.1).square().mean(dim=1)
         for i, name in enumerate(self.joint_names):
             samples[f"joint_target/{name}"] = targets[:, i]
             samples[f"joint_pos/{name}"] = positions[:, i]
@@ -162,6 +179,7 @@ class MicroDuckDiagnostics(RecorderTerm):
             default = data.default_joint_pos.torch[:, self.joint_ids][:, indices]
             metrics[f"{side}_target_offset_rms_rad"] = (targets[:, indices] - default).square().mean(1).sqrt()
             metrics[f"{side}_actual_offset_rms_rad"] = (positions[:, indices] - default).square().mean(1).sqrt()
+        metrics["head_joint_error_rms_rad"] = (targets[:, 5:9] - positions[:, 5:9]).square().mean(1).sqrt()
 
         for i, side in enumerate(("left", "right")):
             ankle_speed = foot_vel[:, i, :2].norm(dim=1)
@@ -221,6 +239,7 @@ class MicroDuckDiagnosticsCfg(RecorderTermCfg):
 
     class_type: type[RecorderTerm] = MicroDuckDiagnostics
     capture_samples: bool = False
+    tracking_tolerance: list[float] | None = None
     contact_threshold_n: float = 1.0
     sole_offset_m: float = 0.0225
 

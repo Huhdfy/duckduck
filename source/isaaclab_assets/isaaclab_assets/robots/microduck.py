@@ -24,7 +24,7 @@ from isaaclab.utils import clone, replace
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 # 这些数值是 XL330 的辨识参数，描述电气响应和摩擦；不能直接当成普通 PD 增益调节。
-# 舵机 封装，接受指令 执行具体转动  电压->原始电机->关节转动 
+# 舵机 封装，接受指令 执行具体转动  电压->原始电机->关节转动
 _XL330_MOTOR_CFG = BamMotorCfg(
     model="m6",
     kt=0.36601349688984386,
@@ -129,6 +129,7 @@ MICRODUCK_ALLCOLLISIONS_CFG.spawn.usd_path = (
     f"{ISAACLAB_NUCLEUS_DIR}/Robots/PollenRobotics/MicroDuck/microduck_allcollisions.usd"
 )
 """MicroDuck with additional trunk, hip, and head collision geometry for whole-body contact."""
+
 
 # 对齿轮间隙进行建模
 def _with_backlash(cfg: ArticulationCfg, usd_name: str) -> ArticulationCfg:

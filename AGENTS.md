@@ -40,3 +40,8 @@ The guide owns shared contribution rules. Update them there instead of copying t
 - Keep repository-owned skills in `skills/`; do not duplicate their contents in tool-specific discovery directories.
 - Validate skill changes with `uv run --no-project python tools/skills/cli.py check`.
 - Keep skills concise and point to maintained documentation and source examples.
+
+## MicroDuck experiment records
+
+- For MicroDuck experiments, evaluations, and result reviews, follow [the experiment recording standard](examples/demos/microduck_experiment_records.md).
+- The AI prepares the records, tables, figures, and conclusions from real data, and publishes `experiment.json` last. The dashboard's record reader only loads and validates these artifacts; it does not need to generate research content.

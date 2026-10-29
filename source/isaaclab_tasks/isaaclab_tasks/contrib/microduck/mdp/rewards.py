@@ -37,6 +37,40 @@ def _command_magnitude(env: ManagerBasedRLEnv, command_name: str) -> torch.Tenso
     return torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
 
 
+class joint_tracking_error_l2(ManagerTermBase):
+    """Dead-zone tracking cost after physics, including command delay, in physical joint coordinates.
+
+    ``asset_cfg`` must select the action joints in action order. The tolerance is per joint [rad];
+    ``scale`` [rad] makes the mean squared excess dimensionless. RewardManager supplies dt and weight.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        action = env.action_manager.get_term(cfg.params.get("action_name", "joint_pos"))
+        self.tolerance = torch.tensor(cfg.params["tolerance"], device=env.device)
+        if (
+            self.tolerance.shape != (action.action_dim,)
+            or not torch.isfinite(self.tolerance).all()
+            or (self.tolerance < 0).any()
+        ):
+            raise ValueError("Tracking tolerance must contain one finite non-negative angle per action joint.")
+        if cfg.params.get("scale", 0.1) <= 0:
+            raise ValueError("Tracking error scale must be positive.")
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        tolerance: list[float],
+        asset_cfg: SceneEntityCfg,
+        action_name: str = "joint_pos",
+        scale: float = 0.1,
+    ) -> torch.Tensor:
+        action = env.action_manager.get_term(action_name)
+        actual = env.scene[asset_cfg.name].data.joint_pos.torch[:, asset_cfg.joint_ids]
+        excess = (action.physical_targets - actual).abs().sub(self.tolerance).clamp_min(0)
+        return zero_non_finite((excess / scale).square().mean(dim=1))
+
+
 """
 Velocity-tracking rewards.
 """
@@ -59,16 +93,28 @@ def track_linear_velocity(
 
 
 def track_angular_velocity(
-    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    shape: str = "exponential",
 ) -> torch.Tensor:
-    """Track yaw rate, including roll/pitch drift, with tolerance ``std`` [rad/s]."""
+    """Track yaw, including roll/pitch drift, using an exponential or rational kernel.
+
+    ``std`` is in rad/s. Both kernels have unit value and derivative ``-1/std**2``
+    with respect to squared error at zero; the rational kernel has a heavier tail.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
     actual = asset.data.root_link_ang_vel_b.torch
     z_error = torch.square(command[:, 2] - actual[:, 2])
     xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
     # 指数核最大为 1；误差平方和等于 std² 时奖励为 e⁻¹，这里没有高斯密度中的 1/2 系数。
-    return zero_non_finite(torch.exp(-(z_error + xy_error) / std**2))
+    if shape == "exponential":
+        return zero_non_finite(torch.exp(-(z_error + xy_error) / std**2))
+    if shape == "rational":
+        return zero_non_finite(1.0 / (1.0 + (z_error + xy_error) / std**2))
+    raise ValueError(f"Unknown angular tracking reward shape: {shape}")
 
 
 """

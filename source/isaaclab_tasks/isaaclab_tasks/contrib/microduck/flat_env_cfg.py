@@ -321,6 +321,9 @@ class EventsCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
+    # Disabled in the baseline; continuation experiments supply calibrated tolerances and weight.
+    joint_tracking_error: RewTerm | None = None
+
     # 奖励函数返回每个环境的原始值，管理器再乘权重并以控制周期 dt 缩放总和。
     # 非负代价项通过负权重成为惩罚；实际权重还可能被下方 curriculum 修改。
     # TensorBoard 的 Episode_Reward/<名称> 是结束回合的加权累计贡献均值 / 最大回合时长 20 s，

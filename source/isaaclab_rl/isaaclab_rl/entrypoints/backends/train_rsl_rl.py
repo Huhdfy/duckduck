@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
 import os
 import time
@@ -28,6 +29,7 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config, setup_preset_cli
 
 from ...rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
+from ...utils.chinese_logging import TrainingLogAdapter
 from ...utils.wandb import announce_new_run, is_wandb_checkpoint, resolve_wandb_checkpoint, resolve_wandb_entity
 from ..common import (
     CHECKPOINT_SELECTORS,
@@ -74,6 +76,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Restore the policy optimizer; disable to keep a fresh optimizer and configured learning rate.",
     )
     cli_args.add_rsl_rl_args(parser)
+    parser.add_argument("--log_language", choices=("en", "zh"), default="en", help="Training log display language.")
+    parser.add_argument(
+        "--save_additional_interval",
+        type=int,
+        default=None,
+        help="Also save every N newly completed updates, independently of the checkpoint iteration label.",
+    )
     parser.add_argument(
         "--resume_env_steps",
         type=int,
@@ -83,6 +92,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     add_launcher_args(parser)
     remaining_args_env_registration = cli_args.register_external_tasks(argv)
     args_cli, remaining_args = setup_preset_cli(parser, argv)
+    if args_cli.save_additional_interval is not None and args_cli.save_additional_interval < 1:
+        parser.error("--save_additional_interval must be positive")
     if remaining_args_env_registration is not None:
         _, remaining_args_env_registration = setup_preset_cli(parser, remaining_args_env_registration)
     enable_cameras_for_video(args_cli)
@@ -128,10 +139,11 @@ def run(argv: list[str]) -> None:
 
 def _run(args_cli: argparse.Namespace) -> None:
     """Execute RSL-RL training with parsed arguments."""
+    zh = args_cli.log_language == "zh"
     with startup_screen(args_cli, num_stages=3) as screen:
         env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent)
         pre_launch_video_config(env_cfg, args_cli)
-        screen.stage("Launching simulation")
+        screen.stage("启动仿真" if zh else "Launching simulation")
         with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
             show_run_summary(screen, args_cli, env_cfg, library="rsl_rl", action="train")
             agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
@@ -144,9 +156,11 @@ def _run(args_cli: argparse.Namespace) -> None:
             env_cfg.seed = agent_cfg.seed
 
             log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
-            logger.info(f"Logging experiment in directory: {log_root_path}")
+            logger.info(f"实验日志目录：{log_root_path}" if zh else f"Logging experiment in directory: {log_root_path}")
             run_name = args_cli.run_timestamp or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            logger.info(f"Exact experiment name requested from command line: {run_name}")
+            logger.info(
+                f"实验名称：{run_name}" if zh else f"Exact experiment name requested from command line: {run_name}"
+            )
             if agent_cfg.run_name:
                 run_name += f"_{agent_cfg.run_name}"
             log_dir = os.path.join(log_root_path, run_name)
@@ -163,7 +177,7 @@ def _run(args_cli: argparse.Namespace) -> None:
             env_cfg.log_dir = rank_dir
             apply_video_recording(env_cfg, rank_dir, args_cli)
 
-            screen.stage("Creating environment")
+            screen.stage("创建环境" if zh else "Creating environment")
             env = create_isaaclab_env(
                 args_cli.task,
                 env_cfg,
@@ -176,15 +190,19 @@ def _run(args_cli: argparse.Namespace) -> None:
                     raise ValueError("--resume_env_steps requires an environment with common_step_counter.")
                 # The RSL-RL wrapper resets the environment below, applying curricula before reset events.
                 env.unwrapped.common_step_counter = args_cli.resume_env_steps
-                logger.info(f"Restored curriculum control step: {args_cli.resume_env_steps}")
+                logger.info(
+                    f"已恢复课程控制步：{args_cli.resume_env_steps}"
+                    if zh
+                    else f"Restored curriculum control step: {args_cli.resume_env_steps}"
+                )
             env = wrap_sensor_capture(env, rank_dir, args_cli)
 
-            screen.stage("Preparing agent")
+            screen.stage("准备策略" if zh else "Preparing agent")
             start_time = time.time()
-            report_activity("Wrapping environment")
+            report_activity("适配环境" if zh else "Wrapping environment")
             env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
             report_activity(None)
-            report_activity("Building policy")
+            report_activity("构建策略" if zh else "Building policy")
             if agent_cfg.class_name == "OnPolicyRunner":
                 runner = OnPolicyRunner(env, to_dict(agent_cfg), log_dir=log_dir, device=agent_cfg.device)
             elif agent_cfg.class_name == "DistillationRunner":
@@ -199,7 +217,7 @@ def _run(args_cli: argparse.Namespace) -> None:
 
             runner.add_git_repo_to_log(__file__)
             if resume_path is not None:
-                logger.info(f"Loading model checkpoint from: {resume_path}")
+                logger.info(f"加载检查点：{resume_path}" if zh else f"Loading model checkpoint from: {resume_path}")
                 # map to this process's device; the checkpoint's tensors otherwise land on the GPU that saved them
                 runner.load(
                     resume_path,
@@ -208,6 +226,42 @@ def _run(args_cli: argparse.Namespace) -> None:
                     ),
                     map_location=agent_cfg.device,
                 )
+            if zh and agent_cfg.logger != "tensorboard":
+                raise ValueError("--log_language zh currently supports the TensorBoard logger.")
+            if zh or args_cli.save_additional_interval:
+                runner.logger = TrainingLogAdapter(runner, args_cli.log_language, args_cli.save_additional_interval)
+            if resume_path is not None:
+                logger.info(
+                    f"已恢复迭代：{runner.current_learning_iteration}；学习率：{runner.alg.learning_rate}"
+                    if zh
+                    else (
+                        f"Restored iteration: {runner.current_learning_iteration}; "
+                        f"learning rate: {runner.alg.learning_rate}"
+                    )
+                )
+                os.makedirs(rank_dir, exist_ok=True)
+                with open(os.path.join(rank_dir, "resume_state.json"), "w") as stream:
+                    json.dump(
+                        {
+                            "iteration": runner.current_learning_iteration,
+                            "learning_rate": runner.alg.learning_rate,
+                            "common_step_counter": getattr(env.unwrapped, "common_step_counter", None),
+                            "reward_weights": {
+                                name: env.unwrapped.reward_manager.get_term_cfg(name).weight
+                                for name in env.unwrapped.reward_manager.active_terms
+                            }
+                            if hasattr(env.unwrapped, "reward_manager")
+                            else {},
+                            "commands": {
+                                name: to_dict(env.unwrapped.command_manager.get_term(name).cfg)
+                                for name in env.unwrapped.command_manager.active_terms
+                            }
+                            if hasattr(env.unwrapped, "command_manager")
+                            else {},
+                        },
+                        stream,
+                        indent=2,
+                    )
             dump_train_configs(rank_dir, env_cfg, agent_cfg)
 
             if agent_cfg.logger == "wandb":
@@ -219,7 +273,8 @@ def _run(args_cli: argparse.Namespace) -> None:
                     num_learning_iterations=agent_cfg.max_iterations,
                     init_at_random_ep_len=agent_cfg.init_at_random_ep_len,
                 )
-                print(f"Training time: {round(time.time() - start_time, 2)} seconds")
+                elapsed = round(time.time() - start_time, 2)
+                print(f"训练耗时：{elapsed} 秒" if zh else f"Training time: {elapsed} seconds")
                 # the RL library creates the process group but never destroys it, which torch warns about at exit
                 if dist.is_initialized():
                     dist.destroy_process_group()

@@ -33,8 +33,12 @@ class BiasedJointPositionAction(JointPositionAction):
         self.encoder_bias = torch.zeros(self.num_envs, self.action_dim, device=self.device)
 
     def apply_actions(self):
-        target = self.processed_actions - self.encoder_bias
-        self._asset.set_joint_position_target_index(target=target, joint_ids=self._joint_ids)
+        self._asset.set_joint_position_target_index(target=self.physical_targets, joint_ids=self._joint_ids)
+
+    @property
+    def physical_targets(self) -> torch.Tensor:
+        """Current position command in physical joint coordinates, before actuator delay [rad]."""
+        return self.processed_actions - self.encoder_bias
 
 
 @configclass

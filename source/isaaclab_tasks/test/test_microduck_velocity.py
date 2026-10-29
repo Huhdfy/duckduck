@@ -43,6 +43,103 @@ POLICY_TERMS = [
 """Actor input order of the deployed ONNX policy."""
 
 
+def test_tracking_cost_uses_physical_targets_and_ordered_post_step_positions():
+    """Bias and default pose are coordinate transforms, not tracking error; only dead-zone excess costs."""
+    from isaaclab.managers import RewardTermCfg
+
+    from isaaclab_tasks.contrib.microduck.mdp.actions import BiasedJointPositionAction
+    from isaaclab_tasks.contrib.microduck.mdp.rewards import joint_tracking_error_l2
+
+    action = object.__new__(BiasedJointPositionAction)
+    action._num_joints = 2
+    action._processed_actions = torch.tensor([[0.3, 0.6]]).expand(4, -1)
+    action.encoder_bias = torch.tensor([[0.1, 0.2]]).expand(4, -1)
+    positions = torch.tensor([[0.4, 9, 0.2], [0.44, 9, 0.24], [0.6, 9, 0.4], [float("nan"), 9, 0.2]])
+    env = SimpleNamespace(
+        device="cpu",
+        action_manager=SimpleNamespace(get_term=lambda _: action),
+        scene={"robot": SimpleNamespace(data=SimpleNamespace(joint_pos=SimpleNamespace(torch=positions)))},
+    )
+    cfg = RewardTermCfg(
+        func=joint_tracking_error_l2,
+        weight=-1,
+        params={
+            "tolerance": [0.05, 0.05],
+            "asset_cfg": SceneEntityCfg("robot", joint_ids=[2, 0]),
+            "scale": 0.1,
+        },
+    )
+    term = joint_tracking_error_l2(cfg, env)
+    torch.testing.assert_close(term(env, **cfg.params), torch.tensor([0.0, 0.0, 2.25, 0.0]))
+
+
+def test_continuation_variants_are_independent_and_calibration_is_balanced():
+    """Reward ablations preserve the baseline and calibration targets exactly 5% positive contribution."""
+    import numpy as np
+
+    from isaaclab_tasks.contrib.microduck.experiments import apply_variant, freeze_calibration
+    from isaaclab_tasks.utils import resolve_task_config
+
+    baseline, _ = resolve_task_config(TASK, "rsl_rl_cfg_entry_point", overrides=())
+    groups = []
+    for i in range(7):
+        values = np.tile(np.array([0.01, 0.03, 0.05, 0.07]), 300 * (i + 1))[:, None]
+        groups.append(
+            {
+                "case": str(i),
+                "errors": np.repeat(values, 14, 1),
+                "positive_rewards": np.full(len(values), 4.0),
+                "valid_trials": 16,
+            }
+        )
+    calibration = freeze_calibration(groups, MICRODUCK_JOINT_NAMES)
+    assert calibration["weight_magnitude"] * calibration["cost_mean"] == pytest.approx(0.2)
+    for variant in ("baseline", "velocity_weight", "velocity_std", "joint_tracking", "v_std", "w_std", "w_rational"):
+        cfg = apply_variant(baseline.copy(), variant, calibration)
+        assert cfg.rewards.track_lin_vel.weight == (4 if variant == "velocity_weight" else 2)
+        assert cfg.rewards.track_ang_vel.weight == (4 if variant == "velocity_weight" else 2)
+        assert cfg.rewards.track_lin_vel.params["std"] == pytest.approx(
+            0.15 if variant in ("velocity_std", "v_std") else 0.1**0.5
+        )
+        assert cfg.rewards.track_ang_vel.params["std"] == pytest.approx(
+            0.35 if variant in ("velocity_std", "w_std", "w_rational") else 0.5**0.5
+        )
+        assert (cfg.rewards.joint_tracking_error is not None) == (variant == "joint_tracking")
+    assert baseline.rewards.joint_tracking_error is None
+    assert baseline.recorders.diagnostics.tracking_tolerance is None
+    halved = apply_variant(baseline.copy(), "competitor_half", competitor="action_rate_l2")
+    from isaaclab_tasks.contrib.microduck.experiments import freeze_curriculum
+
+    freeze_curriculum(halved, 144024)
+    assert halved.rewards.action_rate_l2.weight == -0.5, "the mature curriculum must preserve the intervention"
+    assert halved.rewards.head_pose_bias.weight == -3
+    groups[0]["errors"] = groups[0]["errors"][:2]
+    with pytest.raises(ValueError, match="Insufficient"):
+        freeze_calibration(groups, MICRODUCK_JOINT_NAMES)
+
+
+def test_angular_reward_shapes_preserve_units_and_local_scale():
+    """Both kernels include roll/pitch and yaw, share local scale, and differ in their high-error tail."""
+    import math
+
+    from isaaclab_tasks.contrib.microduck.mdp.rewards import track_angular_velocity
+
+    angular = torch.tensor([[0.0, 0.0, 0.0], [0.35, 0.0, 0.0], [0.0, 0.0, 1.05]], dtype=torch.float64)
+    env = SimpleNamespace(
+        scene={"robot": SimpleNamespace(data=SimpleNamespace(root_link_ang_vel_b=SimpleNamespace(torch=angular)))},
+        command_manager=SimpleNamespace(get_command=lambda _: torch.zeros_like(angular)),
+    )
+    for shape, expected in (("exponential", [1.0, math.exp(-1), math.exp(-9)]), ("rational", [1.0, 0.5, 0.1])):
+        result = track_angular_velocity(env, 0.35, "base_velocity", shape=shape)
+        torch.testing.assert_close(result, torch.tensor(expected, dtype=torch.float64))
+        angular[0, 2] = 1e-4
+        perturbed = track_angular_velocity(env, 0.35, "base_velocity", shape=shape)[0]
+        assert (1 - perturbed.item()) / 1e-8 == pytest.approx(1 / 0.35**2, rel=1e-6)
+        angular[0, 2] = 0
+    with pytest.raises(ValueError, match="Unknown"):
+        track_angular_velocity(env, 0.35, "base_velocity", shape="unknown")
+
+
 def _make_env(task: str, device: str, num_envs: int, overrides: tuple[str, ...] = ()):
     cfg = parse_env_cfg(task, device=device, num_envs=num_envs, overrides=overrides)
     sim_utils.create_new_stage()
@@ -57,7 +154,23 @@ def test_microduck_deploy_interface_and_friction_reset(device, monkeypatch):
 
     A diverged state terminates only its environment, whose final reward and reset observations stay finite.
     """
-    env = _make_env(TASK, device, num_envs=2)
+    from isaaclab.managers import RewardTermCfg
+
+    from isaaclab_tasks.contrib.microduck.mdp.rewards import joint_tracking_error_l2
+
+    cfg = parse_env_cfg(TASK, device=device, num_envs=2)
+    cfg.recorders.diagnostics.capture_samples = True
+    cfg.recorders.diagnostics.tracking_tolerance = [0.05] * 14
+    cfg.rewards.joint_tracking_error = RewardTermCfg(
+        func=joint_tracking_error_l2,
+        weight=-0.2,
+        params={
+            "tolerance": [0.05] * 14,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=MICRODUCK_JOINT_NAMES, preserve_order=True),
+        },
+    )
+    sim_utils.create_new_stage()
+    env = gym.make(TASK, cfg=cfg).unwrapped
     try:
         obs, _ = env.reset()
         assert obs["policy"].shape == (2, 61)
@@ -90,6 +203,17 @@ def test_microduck_deploy_interface_and_friction_reset(device, monkeypatch):
                 obs, reward, *_ = env.step(torch.randn(2, 14, device=env.device) * 0.1)
                 assert all(torch.isfinite(value).all() for value in obs.values())
                 assert torch.isfinite(reward).all()
+                recorder = env.recorder_manager._terms["diagnostics"]
+                samples = dict(zip(recorder.sample_names, recorder.snapshot.unbind(dim=1)))
+                errors = torch.stack(
+                    [samples[f"joint_target/{name}"] - samples[f"joint_pos/{name}"] for name in MICRODUCK_JOINT_NAMES],
+                    1,
+                )
+                expected_cost = ((errors.abs() - 0.05).clamp_min(0) / 0.1).square().mean(1)
+                reward_index = env.reward_manager.active_terms.index("joint_tracking_error")
+                torch.testing.assert_close(
+                    env.reward_manager.weighted_term_values[:, reward_index], -0.2 * expected_cost
+                )
                 yaw_errors.append(robot.data.root_link_ang_vel_b.torch[:, 2].clone() - command)
             assert len(observation_calls) == 20, "state-only recording must not draw extra observation noise"
             _, info = env.reset()
