@@ -171,7 +171,11 @@ def position_reward(env):
     term = env.command_manager.get_term("base_velocity")
     term.update_reference()
     error = (term.robot.data.root_link_pos_w.torch[:, :2] - term.reference_position).norm(dim=-1)
-    return torch.nan_to_num(torch.exp(-(error.sub(0.05).clamp_min(0) / 0.75).square()))
+    elapsed = (env.common_step_counter - term._resampled_step).clamp_min(0) * env.step_dt
+    path_length = term.command[:, :2].norm(dim=-1) * elapsed
+    # Commands are constant within each period; normalize by its ideal traveled distance.
+    scale = 0.12 * (path_length + 0.05)
+    return torch.nan_to_num(torch.exp(-(error / scale).square()))
 
 
 def make_config(variant, num_envs, seed):
