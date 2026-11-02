@@ -42,7 +42,7 @@ VARIANTS = {
     "yaw_reward": (4.0, 4.0, 1.0, 0.0),
     "pos_half": (2.0, 2.0, 1.0, 4.0),
     "pos_only": (0.0, 0.0, 1.0, 8.0),
-    "pos_add": (4.0, 4.0, 1.0, 8.0),
+    "pos_add": (4.0, 4.0, 1.0, 4.0),
 }
 IMU_PARAMS = {"max_angle_deg": 6.0, "min_lag": 0, "max_lag": 1, "update_period": 64}
 
