@@ -6,6 +6,8 @@
 """Adapt the local MicroDuck keyboard viewer to cumulative-heading checkpoints."""
 
 import importlib.util
+import sys
+import tempfile
 from pathlib import Path
 
 import torch
@@ -50,5 +52,34 @@ keyboard.comparison_config = tracking_config
 keyboard.KeyboardComparison.reset = tracking_reset
 keyboard.KeyboardComparison.step = tracking_step
 
+
+def adapt_legacy_checkpoint(path, output):
+    """Append an ignored heading input to a legacy actor without changing its outputs."""
+    data = torch.load(path, map_location="cpu", weights_only=True)
+    actor = data["actor_state_dict"]
+    if actor["mlp.0.weight"].shape[1] != 61:
+        return path
+    actor["mlp.0.weight"] = torch.nn.functional.pad(actor["mlp.0.weight"], (0, 1), value=0)
+    for key, value in (("_mean", 0), ("_var", 1), ("_std", 1)):
+        name = f"obs_normalizer.{key}"
+        actor[name] = torch.nn.functional.pad(actor[name], (0, 1), value=value)
+    torch.save(data, output)
+    return output
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="microduck_keyboard_") as temporary:
+        in_checkpoints = False
+        for index, value in enumerate(sys.argv[1:], 1):
+            if value in ("--checkpoint", "--checkpoints"):
+                in_checkpoints = True
+            elif value.startswith("--"):
+                in_checkpoints = False
+            elif in_checkpoints and value != "latest":
+                output = Path(temporary) / f"checkpoint_{index}.pt"
+                sys.argv[index] = str(adapt_legacy_checkpoint(Path(value).expanduser(), output))
+        keyboard.main()
+
+
 if __name__ == "__main__":
-    keyboard.main()
+    main()
