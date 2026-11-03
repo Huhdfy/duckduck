@@ -208,6 +208,7 @@ def main():
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--forward-max", type=float, default=1.0)
     parser.add_argument("--linear-weight", type=float)
+    parser.add_argument("--position-weight", type=float)
     parser.add_argument("--run-name")
     parser.add_argument("--save-interval", type=int, default=1000)
     args = parser.parse_args()
@@ -220,6 +221,8 @@ def main():
     cfg.commands.base_velocity.ranges.lin_vel_x = (-1.0, args.forward_max)
     if args.linear_weight is not None:
         cfg.rewards.track_lin_vel.weight = args.linear_weight
+    if args.position_weight is not None:
+        cfg.rewards.position_tracking.weight = args.position_weight
     agent_cfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
     agent_cfg.seed = args.seed
     agent_cfg.max_iterations = args.iterations
@@ -234,7 +237,12 @@ def main():
         "seed": args.seed,
         "source_revision": revision,
         "fast_mixed": "reconstructed from saved parameters; original implementation unavailable",
-        "weights": [cfg.rewards.track_lin_vel.weight, *VARIANTS[args.variant][1:]],
+        "weights": [
+            cfg.rewards.track_lin_vel.weight,
+            cfg.rewards.track_ang_vel.weight,
+            cfg.rewards.heading_tracking.weight,
+            cfg.rewards.position_tracking.weight,
+        ],
         "parent_checkpoint": str(args.checkpoint.resolve()) if args.checkpoint else None,
         "forward_range": [-1.0, args.forward_max],
         "additional_iterations": args.iterations,
