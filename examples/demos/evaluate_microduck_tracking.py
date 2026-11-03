@@ -125,10 +125,29 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trials", type=int, default=16)
     parser.add_argument("--seed", type=int, default=137)
+    parser.add_argument("--suite", choices=("original", "requested"), default="original")
+    parser.add_argument("--baseline", action="store_true", help="Evaluate the original 61/76-observation policy.")
     args = parser.parse_args()
+    if args.suite == "requested":
+        CASES.clear()
+        CASES.update(
+            {
+                "v01": (0.1, 0.0, 0.0),
+                "v02": (0.2, 0.0, 0.0),
+                "v04": (0.4, 0.0, 0.0),
+                "v10": (1.0, 0.0, 0.0),
+                "w01_pos": (0.0, 0.0, 0.1),
+                "w01_neg": (0.0, 0.0, -0.1),
+                "w05_pos": (0.0, 0.0, 0.5),
+                "w05_neg": (0.0, 0.0, -0.5),
+            }
+        )
     args.output.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     cfg = make_config(args.variant, len(CASES) * args.trials, args.seed)
+    if args.baseline:
+        cfg.observations.policy.heading_error = None
+        cfg.observations.critic.heading_error = None
     cfg.episode_length_s = 30.0
     cfg.events.push_robot = None
     for key in list(vars(cfg.curriculum)):
@@ -164,8 +183,9 @@ def main():
             if step % period == 0:
                 term._resample(torch.arange(env.num_envs, device=device))
                 sequence_speed = (0.1, 0.6, 0.1, 0.0)[step // period]
-                index = list(CASES).index("speed_change") * args.trials
-                commands[index : index + args.trials, 0] = sequence_speed
+                if "speed_change" in CASES:
+                    index = list(CASES).index("speed_change") * args.trials
+                    commands[index : index + args.trials, 0] = sequence_speed
                 term.vel_command_b[:] = commands
                 term.is_standing_env[:] = commands.abs().sum(-1) == 0
                 term.time_left[:] = 1e9
@@ -176,7 +196,7 @@ def main():
                 ("push_late", 9, 1, 0.25),
                 ("yaw_push", 7, 5, 0.4),
             ):
-                if step == round(push_time / env.step_dt):
+                if case in CASES and step == round(push_time / env.step_dt):
                     index = list(CASES).index(case) * args.trials
                     ids = torch.arange(index, index + args.trials, device=device)
                     velocity = robot.data.root_vel_w.torch[ids].clone()
@@ -234,6 +254,8 @@ def main():
     np.savez_compressed(args.output / f"{args.variant}_traces.npz", trace=trace)
     result = {
         "variant": args.variant,
+        "suite": args.suite,
+        "baseline": args.baseline,
         "checkpoint": str(args.checkpoint.resolve()),
         "seed": args.seed,
         "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
