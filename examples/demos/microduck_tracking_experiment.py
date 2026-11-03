@@ -205,6 +205,11 @@ def main():
     parser.add_argument("--iterations", type=int, default=6000)
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--output-root", default="logs/rsl_rl/microduck_velocity_flat")
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--forward-max", type=float, default=1.0)
+    parser.add_argument("--linear-weight", type=float)
+    parser.add_argument("--run-name")
+    parser.add_argument("--save-interval", type=int, default=1000)
     args = parser.parse_args()
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -212,11 +217,14 @@ def main():
     torch.backends.cudnn.benchmark = True
     torch.manual_seed(args.seed)
     cfg = make_config(args.variant, args.num_envs, args.seed)
+    cfg.commands.base_velocity.ranges.lin_vel_x = (-1.0, args.forward_max)
+    if args.linear_weight is not None:
+        cfg.rewards.track_lin_vel.weight = args.linear_weight
     agent_cfg = load_cfg_from_registry(TASK, "rsl_rl_cfg_entry_point")
     agent_cfg.seed = args.seed
     agent_cfg.max_iterations = args.iterations
-    agent_cfg.save_interval = 1000
-    log_dir = Path(args.output_root).resolve() / f"{datetime.now():%Y-%m-%d_%H-%M-%S}_{args.variant}"
+    agent_cfg.save_interval = args.save_interval
+    log_dir = Path(args.output_root).resolve() / f"{datetime.now():%Y-%m-%d_%H-%M-%S}_{args.run_name or args.variant}"
     cfg.log_dir = str(log_dir)
     log_dir.mkdir(parents=True, exist_ok=False)
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -226,13 +234,25 @@ def main():
         "seed": args.seed,
         "source_revision": revision,
         "fast_mixed": "reconstructed from saved parameters; original implementation unavailable",
-        "weights": VARIANTS[args.variant],
+        "weights": [cfg.rewards.track_lin_vel.weight, *VARIANTS[args.variant][1:]],
+        "parent_checkpoint": str(args.checkpoint.resolve()) if args.checkpoint else None,
+        "forward_range": [-1.0, args.forward_max],
+        "additional_iterations": args.iterations,
+        "save_interval": args.save_interval,
     }
     (log_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     sim_utils.create_new_stage()
     env = gym.make(TASK, cfg=cfg).unwrapped
     wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = OnPolicyRunner(wrapped, agent_cfg.to_dict(), log_dir=str(log_dir), device="cuda:0")
+    if args.checkpoint:
+        runner.load(str(args.checkpoint))
+        # Saved iteration is the last completed update; continue with the next update.
+        runner.current_learning_iteration += 1
+        metadata["start_iteration"] = runner.current_learning_iteration
+        metadata["loaded_learning_rate"] = runner.alg.learning_rate
+        (log_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        print(f"RESUMED_FROM={args.checkpoint} START_ITERATION={runner.current_learning_iteration}", flush=True)
     runner.add_git_repo_to_log(__file__)
     dump_yaml(str(log_dir / "params" / "env.yaml"), cfg)
     dump_yaml(str(log_dir / "params" / "agent.yaml"), agent_cfg)
