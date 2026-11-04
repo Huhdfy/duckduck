@@ -125,7 +125,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trials", type=int, default=16)
     parser.add_argument("--seed", type=int, default=137)
-    parser.add_argument("--suite", choices=("original", "requested", "speedup"), default="original")
+    parser.add_argument("--suite", choices=("original", "requested", "speedup", "comprehensive"), default="original")
     parser.add_argument("--baseline", action="store_true", help="Evaluate the original 61/76-observation policy.")
     args = parser.parse_args()
     if args.suite == "requested":
@@ -145,6 +145,10 @@ def main():
     if args.suite == "speedup":
         CASES.clear()
         CASES.update({f"vx_{speed:g}": (speed, 0.0, 0.0) for speed in (-1.0, -0.5, 0.1, 0.4, 1.0, 1.2, 1.5)})
+    if args.suite == "comprehensive":
+        CASES.clear()
+        CASES.update({f"vx_{speed:g}": (speed, 0.0, 0.0) for speed in (0.1, 0.2, 0.4, 0.8, 1.0, 1.2, 1.5)})
+        CASES.update({f"wz_{rate:g}": (0.0, 0.0, rate) for rate in (0.1, -0.1, 0.5, -0.5)})
     args.output.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     cfg = make_config(args.variant, len(CASES) * args.trials, args.seed)
