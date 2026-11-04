@@ -15,7 +15,7 @@ from microduck_tracking_experiment import TrackingVelocityCommand, observed_imu,
 
 from isaaclab.managers import ObservationTermCfg
 
-KEYBOARD_PATH = Path("/mnt/linux-data/www/IsaacLab-MicroDuck-main/examples/demos/microduck_keyboard.py")
+KEYBOARD_PATH = Path(__file__).with_name("microduck_keyboard.py")
 spec = importlib.util.spec_from_file_location("microduck_keyboard_local", KEYBOARD_PATH)
 keyboard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(keyboard)

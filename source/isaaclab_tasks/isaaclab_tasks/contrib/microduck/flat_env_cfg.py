@@ -124,9 +124,7 @@ class CommandsCfg:
         rel_forward_envs=0.2,
         rel_turn_in_place_envs=0.15,
         debug_vis=True,
-        ranges=mdp.MicroDuckVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.4, 0.4), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-1.0, 1.0)
-        ),
+        ranges=mdp.MicroDuckVelocityCommandCfg.Ranges(lin_vel_x=(-1, 1), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-1.0, 1.0)),
     )
     head_pose = mdp.UniformPoseDeltaCommandCfg(
         resampling_time_range=(2.0, 5.0), ranges=((-0.05, 0.05), (-0.05, 0.05), (-0.07, 0.07), (-0.015, 0.015))
