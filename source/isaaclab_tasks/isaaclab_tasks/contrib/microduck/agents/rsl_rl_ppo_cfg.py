@@ -51,3 +51,13 @@ class MicroDuckRoughPPORunnerCfg(MicroDuckPPORunnerCfg):
     """The same PPO recipe with a separate experiment directory for rough terrain."""
 
     experiment_name = preset(default="microduck_velocity_rough", backlash="microduck_velocity_rough_backlash")
+
+
+@configclass
+class MicroDuckSitStandPPORunnerCfg(MicroDuckPPORunnerCfg):
+    """Official-sized PPO baseline with an independent posture observation."""
+
+    experiment_name = "microduck_sit_stand"
+    run_name = "baseline"
+    max_iterations = 3000
+    save_interval = 250
